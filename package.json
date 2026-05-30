@@ -1,6 +1,6 @@
 {
   "name": "localports",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Beautiful interactive localhost port manager for macOS and Linux",
   "type": "module",
   "bin": {
