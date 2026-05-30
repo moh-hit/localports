@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { exec, execFile } from 'child_process';
+import { promises as fsp } from 'fs';
 import { promisify } from 'util';
 
 const execAsync = promisify(exec);
@@ -18,26 +19,22 @@ export interface PortEntry {
 
 interface ProcessMeta {
   cwd: string | null;
-  processName: string | null; // clean name from ps -c (no path, no args)
-  args: string | null;        // resolved dev label (expo start, next dev, etc.)
+  processName: string | null;
+  args: string | null;
   uptime: number | null;
 }
 
-// lsof encodes spaces and special chars as \xNN
-function decodeLsof(s: string): string {
-  return s.replace(/\\x([0-9a-fA-F]{2})/g, (_, h) =>
-    String.fromCharCode(parseInt(h, 16))
-  );
-}
+// ── Shared constants ───────────────────────────────────────────────────────
 
 const KNOWN_SYSTEM: Record<number, string> = {
-  5432: 'postgres',
-  6379: 'redis',
+  22:    'sshd',
+  5432:  'postgres',
+  6379:  'redis',
   27017: 'mongod',
-  3306: 'mysql',
-  8080: 'http-alt',
-  9200: 'elasticsearch',
-  2181: 'zookeeper',
+  3306:  'mysql',
+  8080:  'http-alt',
+  9200:  'elasticsearch',
+  2181:  'zookeeper',
 };
 
 const DEV_COMMANDS = new Set([
@@ -46,13 +43,13 @@ const DEV_COMMANDS = new Set([
   'webpack', 'parcel', 'esbuild', 'tsx', 'ts-node',
 ]);
 
+// macOS GUI apps that listen on ports but aren't dev servers
 const MACOS_SYSTEM_APPS = new Set([
   'ControlCenter', 'Control Center', 'sharingd', 'rapportd', 'AirPlayXPCHel',
   'SystemUIServer', 'cfprefsd', 'distnoted', 'nsurlsessiond', 'bird',
   'cloudd', 'syncdefaultsd', 'mDNSResponder', 'bluetoothd', 'AirPlayXPCHelper',
   'com.apple.WebKit', 'Safari', 'Finder', 'Dock', 'loginwindow',
-  'Raycast', 'raycast',
-  'Figma', 'figma_agent',
+  'Raycast', 'raycast', 'Figma', 'figma_agent',
   'Dropbox', 'DropboxMacUpd',
   'Adobe', 'AdobeIPCBroker', 'AdobeCRD', 'AdobeNotific',
   'Creative Cloud', 'CCXProcess', 'CCLibrary',
@@ -62,23 +59,27 @@ const MACOS_SYSTEM_APPS = new Set([
   'Alfred', 'Bartender', 'CleanMyMac',
   'Docker', 'com.docker',
   'Proxyman', 'Charles', 'Wireshark',
-  'TablePlus', 'Sequel Pro',
-  'Tower', 'Fork', 'SourceTree',
-  'Xcode', 'Simulator',
-  'agent-ser',
+  'TablePlus', 'Sequel Pro', 'Tower', 'Fork', 'SourceTree',
+  'Xcode', 'Simulator', 'agent-ser',
 ]);
 
 function classifyDev(port: number, command: string, cwd: string | null): boolean {
   if (KNOWN_SYSTEM[port]) return false;
   const cmd = command.trim();
-  if (MACOS_SYSTEM_APPS.has(cmd)) return false;
-  for (const app of MACOS_SYSTEM_APPS) {
-    if (cmd.startsWith(app) || app.startsWith(cmd)) return false;
+
+  if (process.platform === 'darwin') {
+    if (MACOS_SYSTEM_APPS.has(cmd)) return false;
+    for (const app of MACOS_SYSTEM_APPS) {
+      if (cmd.startsWith(app) || app.startsWith(cmd)) return false;
+    }
   }
+
   if (DEV_COMMANDS.has(cmd.toLowerCase())) return true;
-  if (cwd && cwd.startsWith('~')) return true;
+  if (cwd && (cwd.startsWith('~') || cwd.startsWith('/home/'))) return true;
   return false;
 }
+
+// ── Label resolution (shared) ──────────────────────────────────────────────
 
 function normalizePath(p: string): string {
   const parts = p.split('/');
@@ -95,14 +96,12 @@ function resolveLabel(fullCmd: string): string {
   const rawBin = parts[0]!;
   const bin = rawBin.split('/').pop()!;
 
-  // node/bun running a script — find the real tool from node_modules
   if (bin === 'node' || bin === 'bun' || bin === 'npx') {
     for (let i = 1; i < parts.length; i++) {
       const part = parts[i]!;
       if (part.startsWith('-')) continue;
       const normalized = normalizePath(part);
 
-      // node_modules/.bin/toolname
       const binMatch = normalized.match(/node_modules\/\.bin\/([^/]+)$/);
       if (binMatch) {
         const tool = binMatch[1]!;
@@ -110,7 +109,6 @@ function resolveLabel(fullCmd: string): string {
         return sub ? `${tool} ${sub}` : tool;
       }
 
-      // node_modules/package/bin/... or node_modules/package/dist/bin/...
       const pkgMatch = normalized.match(/node_modules\/(@?[^/]+(?:\/[^/]+)?)\/(?:[^/]*bin[^/]*)\/[^/]+$/);
       if (pkgMatch) {
         const tool = pkgMatch[1]!.split('/').pop()!;
@@ -120,7 +118,6 @@ function resolveLabel(fullCmd: string): string {
     }
   }
 
-  // Default: binary name + up to 2 meaningful args (subcommands, not flags or paths)
   const sub = parts.slice(1)
     .filter((a: string) => !a.startsWith('-') && !a.startsWith('/') && !a.includes('node_modules'))
     .slice(0, 2)
@@ -128,46 +125,7 @@ function resolveLabel(fullCmd: string): string {
   return sub ? `${bin} ${sub}` : bin;
 }
 
-async function fetchMeta(pid: number): Promise<ProcessMeta> {
-  const [cwdResult, commResult, cmdResult, etimeResult] = await Promise.allSettled([
-    execFileAsync('lsof', ['-p', String(pid), '-a', '-d', 'cwd', '-Fn']),
-    execFileAsync('ps', ['-p', String(pid), '-c', '-o', 'command=']), // name only, no path
-    execFileAsync('ps', ['-p', String(pid), '-o', 'command=']),       // full command line
-    execFileAsync('ps', ['-p', String(pid), '-o', 'etime=']),
-  ]);
-
-  // cwd
-  let cwd: string | null = null;
-  if (cwdResult.status === 'fulfilled') {
-    const line = cwdResult.value.stdout.split('\n').find((l: string) => l.startsWith('n'));
-    if (line) {
-      const raw = line.slice(1).replace(/^\/private/, '');
-      const home = process.env.HOME ?? '/Users';
-      cwd = raw.startsWith(home) ? raw.replace(home, '~') : raw;
-    }
-  }
-
-  // processName: clean name with no path — used for system app display
-  let processName: string | null = null;
-  if (commResult.status === 'fulfilled') {
-    processName = commResult.value.stdout.trim() || null;
-  }
-
-  // args: resolved dev label (expo start, next dev, etc.)
-  let args: string | null = null;
-  if (cmdResult.status === 'fulfilled') {
-    const fullCmd = cmdResult.value.stdout.trim();
-    if (fullCmd) args = resolveLabel(fullCmd);
-  }
-
-  // uptime
-  let uptime: number | null = null;
-  if (etimeResult.status === 'fulfilled') {
-    uptime = parseEtime(etimeResult.value.stdout.trim());
-  }
-
-  return { cwd, processName, args, uptime };
-}
+// ── macOS metadata (lsof + ps) ─────────────────────────────────────────────
 
 function parseEtime(etime: string): number {
   const parts = etime.trim().split(':');
@@ -185,57 +143,171 @@ function parseEtime(etime: string): number {
   return 0;
 }
 
-async function scanPorts(cache: Map<number, ProcessMeta>): Promise<PortEntry[]> {
-  let stdout: string;
-  try {
-    ({ stdout } = await execAsync('lsof -iTCP -sTCP:LISTEN -n -P 2>/dev/null'));
-  } catch {
-    return [];
+async function fetchMetaMacOS(pid: number): Promise<ProcessMeta> {
+  const [cwdResult, commResult, cmdResult, etimeResult] = await Promise.allSettled([
+    execFileAsync('lsof', ['-p', String(pid), '-a', '-d', 'cwd', '-Fn']),
+    execFileAsync('ps', ['-p', String(pid), '-c', '-o', 'command=']),
+    execFileAsync('ps', ['-p', String(pid), '-o', 'command=']),
+    execFileAsync('ps', ['-p', String(pid), '-o', 'etime=']),
+  ]);
+
+  let cwd: string | null = null;
+  if (cwdResult.status === 'fulfilled') {
+    const line = cwdResult.value.stdout.split('\n').find((l: string) => l.startsWith('n'));
+    if (line) {
+      const raw = line.slice(1).replace(/^\/private/, '');
+      const home = process.env.HOME ?? '/Users';
+      cwd = raw.startsWith(home) ? raw.replace(home, '~') : raw;
+    }
   }
 
-  // Parse lsof output into (port, pid, command) triples — deduplicated by port
+  let processName: string | null = null;
+  if (commResult.status === 'fulfilled') {
+    processName = commResult.value.stdout.trim() || null;
+  }
+
+  let args: string | null = null;
+  if (cmdResult.status === 'fulfilled') {
+    const fullCmd = cmdResult.value.stdout.trim();
+    if (fullCmd) args = resolveLabel(fullCmd);
+  }
+
+  let uptime: number | null = null;
+  if (etimeResult.status === 'fulfilled') {
+    uptime = parseEtime(etimeResult.value.stdout.trim());
+  }
+
+  return { cwd, processName, args, uptime };
+}
+
+// ── Linux metadata (/proc — no subprocess needed) ─────────────────────────
+
+async function fetchMetaLinux(pid: number): Promise<ProcessMeta> {
+  const [cwdResult, cmdlineResult, statResult, uptimeResult] = await Promise.allSettled([
+    fsp.realpath(`/proc/${pid}/cwd`),
+    fsp.readFile(`/proc/${pid}/cmdline`),
+    fsp.readFile(`/proc/${pid}/stat`, 'utf8'),
+    fsp.readFile('/proc/uptime', 'utf8'),
+  ]);
+
+  let cwd: string | null = null;
+  if (cwdResult.status === 'fulfilled') {
+    const home = process.env.HOME ?? '/home';
+    cwd = cwdResult.value.startsWith(home)
+      ? cwdResult.value.replace(home, '~')
+      : cwdResult.value;
+  }
+
+  let processName: string | null = null;
+  let args: string | null = null;
+  if (cmdlineResult.status === 'fulfilled') {
+    const parts = cmdlineResult.value.toString().split('\0').filter(Boolean);
+    processName = parts[0]?.split('/').pop() ?? null;
+    if (parts.length) args = resolveLabel(parts.join(' '));
+  }
+
+  let uptime: number | null = null;
+  if (statResult.status === 'fulfilled' && uptimeResult.status === 'fulfilled') {
+    const fields = statResult.value.split(' ');
+    const startJiffies = parseInt(fields[21]!, 10);
+    const sysUptime = parseFloat(uptimeResult.value.split(' ')[0]!);
+    uptime = Math.max(0, Math.floor(sysUptime - startJiffies / 100));
+  }
+
+  return { cwd, processName, args, uptime };
+}
+
+function fetchMeta(pid: number): Promise<ProcessMeta> {
+  return process.platform === 'linux'
+    ? fetchMetaLinux(pid)
+    : fetchMetaMacOS(pid);
+}
+
+// ── Port scanners ──────────────────────────────────────────────────────────
+
+// lsof encodes spaces as \xNN
+function decodeLsof(s: string): string {
+  return s.replace(/\\x([0-9a-fA-F]{2})/g, (_, h) =>
+    String.fromCharCode(parseInt(h, 16))
+  );
+}
+
+async function parsePortsMacOS(): Promise<Map<number, { pid: number; command: string }>> {
   const seen = new Map<number, { pid: number; command: string }>();
-  for (const line of stdout.split('\n').slice(1)) {
-    const parts = line.trim().split(/\s+/);
-    if (parts.length < 9) continue;
-    const command = decodeLsof(parts[0]!);
-    const pid = parseInt(parts[1]!, 10);
-    const addrCol = parts[8]!;
-    if (isNaN(pid)) continue;
-    const portMatch = addrCol.match(/:(\d+)$/);
-    if (!portMatch) continue;
-    const port = parseInt(portMatch[1]!, 10);
-    if (!seen.has(port)) seen.set(port, { pid, command });
-  }
+  try {
+    const { stdout } = await execAsync('lsof -iTCP -sTCP:LISTEN -n -P 2>/dev/null');
+    for (const line of stdout.split('\n').slice(1)) {
+      const parts = line.trim().split(/\s+/);
+      if (parts.length < 9) continue;
+      const command = decodeLsof(parts[0]!);
+      const pid = parseInt(parts[1]!, 10);
+      const addrCol = parts[8]!;
+      if (isNaN(pid)) continue;
+      const portMatch = addrCol.match(/:(\d+)$/);
+      if (!portMatch) continue;
+      const port = parseInt(portMatch[1]!, 10);
+      if (!seen.has(port)) seen.set(port, { pid, command });
+    }
+  } catch {}
+  return seen;
+}
 
-  // Fetch metadata for new PIDs only, cache the rest
+async function parsePortsLinux(): Promise<Map<number, { pid: number; command: string }>> {
+  const seen = new Map<number, { pid: number; command: string }>();
+  try {
+    const { stdout } = await execAsync('ss -tlnp 2>/dev/null');
+    for (const line of stdout.split('\n').slice(1)) {
+      const cols = line.trim().split(/\s+/);
+      if (cols.length < 5 || cols[1] !== 'LISTEN') continue;
+
+      // Local address column: "0.0.0.0:3000" or "[::]:8081"
+      const portStr = cols[4]!.split(':').pop();
+      if (!portStr) continue;
+      const port = parseInt(portStr, 10);
+      if (isNaN(port) || port === 0) continue;
+
+      // Process column: users:(("node",pid=1234,fd=5))
+      const processCol = cols.slice(5).join(' ');
+      const pidMatch = processCol.match(/pid=(\d+)/);
+      const nameMatch = processCol.match(/\("([^"]+)"/);
+      if (!pidMatch) continue; // belongs to another user
+
+      const pid = parseInt(pidMatch[1]!, 10);
+      const command = nameMatch?.[1] ?? 'unknown';
+      if (!seen.has(port)) seen.set(port, { pid, command });
+    }
+  } catch {}
+  return seen;
+}
+
+async function scanPorts(cache: Map<number, ProcessMeta>): Promise<PortEntry[]> {
+  const seen = process.platform === 'linux'
+    ? await parsePortsLinux()
+    : await parsePortsMacOS();
+
+  // Fetch metadata for new PIDs only
   const newPids = new Set<number>();
   for (const { pid } of seen.values()) {
     if (!cache.has(pid)) newPids.add(pid);
   }
 
-  // Evict stale PIDs from cache
+  // Evict stale PIDs
   const activePids = new Set(Array.from(seen.values()).map(v => v.pid));
   for (const pid of cache.keys()) {
     if (!activePids.has(pid)) cache.delete(pid);
   }
 
-  // Fetch all new PIDs in parallel
   await Promise.all(
     Array.from(newPids).map(async pid => {
-      const meta = await fetchMeta(pid);
-      cache.set(pid, meta);
+      cache.set(pid, await fetchMeta(pid));
     })
   );
 
-  // Build final list
   const entries: PortEntry[] = [];
   for (const [port, { pid, command }] of seen) {
     const meta = cache.get(pid) ?? { cwd: null, processName: null, args: null, uptime: null };
     entries.push({
-      port,
-      pid,
-      command,
+      port, pid, command,
       name: KNOWN_SYSTEM[port] ?? meta.processName ?? command,
       cwd: meta.cwd,
       args: meta.args,
@@ -246,6 +318,8 @@ async function scanPorts(cache: Map<number, ProcessMeta>): Promise<PortEntry[]> 
 
   return entries.sort((a, b) => a.port - b.port);
 }
+
+// ── Hook ───────────────────────────────────────────────────────────────────
 
 export function formatUptime(seconds: number): string {
   if (seconds < 60) return `${seconds}s`;

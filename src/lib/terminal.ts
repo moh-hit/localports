@@ -2,87 +2,19 @@ import { spawn } from 'child_process';
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 
-// ── AppleScript helpers ────────────────────────────────────────────────────
+// ── Helpers ────────────────────────────────────────────────────────────────
 
-function osascript(script: string): void {
-  const child = spawn('osascript', ['-e', script.trim()], { stdio: 'ignore' });
-  child.on('error', () => {});
-}
-
-/** Escape for use inside an AppleScript double-quoted string. */
-function esc(s: string): string {
-  return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-}
-
-/** Shell-escape a path for use inside single quotes. */
 function shellEscPath(s: string): string {
   return s.replace(/'/g, "'\\''");
 }
 
-// ── Terminal definitions ───────────────────────────────────────────────────
-
-type ScriptFn = (cmd: string) => string;
-
-/**
- * Factory for terminals that don't expose a tab-creation AppleScript API.
- * Uses System Events to send ⌘T then type the command.
- * Requires Accessibility permission (macOS prompts once).
- */
-function systemEventsTab(app: string, processName = app): ScriptFn {
-  return cmd => `
-    tell application "${app}" to activate
-    delay 0.25
-    tell application "System Events"
-      tell process "${processName}"
-        keystroke "t" using {command down}
-        delay 0.35
-        keystroke "${cmd}"
-        key code 36
-      end tell
-    end tell
-  `;
+function spawnDetached(bin: string, args: string[]): void {
+  const child = spawn(bin, args, { stdio: 'ignore', detached: true });
+  child.on('error', () => {});
+  child.unref();
 }
 
-/**
- * Keyed by the value of $TERM_PROGRAM set by each terminal.
- * Each entry is a function (escaped shellCmd) → AppleScript string.
- */
-const TERMINALS: Record<string, ScriptFn> = {
-  'iTerm.app': cmd => `
-    tell application "iTerm2"
-      activate
-      tell current window
-        create tab with default profile command "${cmd}"
-      end tell
-    end tell
-  `,
-
-  'Apple_Terminal': cmd => `
-    tell application "Terminal"
-      activate
-      tell application "System Events"
-        tell process "Terminal"
-          keystroke "t" using {command down}
-        end tell
-      end tell
-      delay 0.2
-      do script "${cmd}" in selected tab of front window
-    end tell
-  `,
-
-  'WarpTerminal': systemEventsTab('Warp'),
-  'ghostty':      systemEventsTab('Ghostty'),
-};
-
-/** Fallback: open a new Terminal.app window (always available on macOS). */
-const FALLBACK: ScriptFn = cmd => `
-  tell application "Terminal"
-    do script "${cmd}"
-    activate
-  end tell
-`;
-
-// ── Spawn-command resolution ───────────────────────────────────────────────
+// ── Spawn-command resolution (shared) ─────────────────────────────────────
 
 function detectPackageManager(rawCwd: string): string {
   if (existsSync(join(rawCwd, 'bun.lockb')))      return 'bun';
@@ -91,12 +23,6 @@ function detectPackageManager(rawCwd: string): string {
   return 'npm';
 }
 
-/**
- * Resolve the best runnable command for a label + cwd.
- * Labels can be process titles like "next-server (v16.1.6)" — not directly
- * runnable. This maps them to the real command via node_modules/.bin or
- * package.json scripts.
- */
 function resolveSpawnCmd(label: string, rawCwd: string): string {
   const cleaned = label.replace(/\s*\([^)]+\)\s*/g, '').trim();
   const bin = cleaned.split(/\s+/)[0] ?? '';
@@ -126,13 +52,120 @@ function resolveSpawnCmd(label: string, rawCwd: string): string {
   return cleaned;
 }
 
+// ── macOS ──────────────────────────────────────────────────────────────────
+
+function esc(s: string): string {
+  return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+function osascript(script: string): void {
+  const child = spawn('osascript', ['-e', script.trim()], { stdio: 'ignore' });
+  child.on('error', () => {});
+}
+
+type ScriptFn = (cmd: string) => string;
+
+function systemEventsTab(app: string, processName = app): ScriptFn {
+  return cmd => `
+    tell application "${app}" to activate
+    delay 0.25
+    tell application "System Events"
+      tell process "${processName}"
+        keystroke "t" using {command down}
+        delay 0.35
+        keystroke "${cmd}"
+        key code 36
+      end tell
+    end tell
+  `;
+}
+
+const MACOS_TERMINALS: Record<string, ScriptFn> = {
+  'iTerm.app': cmd => `
+    tell application "iTerm2"
+      activate
+      tell current window
+        create tab with default profile command "${cmd}"
+      end tell
+    end tell
+  `,
+  'Apple_Terminal': cmd => `
+    tell application "Terminal"
+      activate
+      tell application "System Events"
+        tell process "Terminal"
+          keystroke "t" using {command down}
+        end tell
+      end tell
+      delay 0.2
+      do script "${cmd}" in selected tab of front window
+    end tell
+  `,
+  'WarpTerminal': systemEventsTab('Warp'),
+  'ghostty':      systemEventsTab('Ghostty'),
+};
+
+const MACOS_FALLBACK: ScriptFn = cmd => `
+  tell application "Terminal"
+    do script "${cmd}"
+    activate
+  end tell
+`;
+
+function openInNewTabMacOS(shellCmd: string): void {
+  const scriptFn = MACOS_TERMINALS[process.env.TERM_PROGRAM ?? ''] ?? MACOS_FALLBACK;
+  osascript(scriptFn(esc(shellCmd)));
+}
+
+// ── Linux ──────────────────────────────────────────────────────────────────
+
+interface LinuxTerminal {
+  detect: () => boolean;
+  open: (shellCmd: string) => void;
+}
+
+const LINUX_TERMINALS: LinuxTerminal[] = [
+  {
+    detect: () => !!process.env.KITTY_WINDOW_ID,
+    open: cmd => spawnDetached('kitty', ['@', 'launch', '--type=tab', 'sh', '-c', cmd]),
+  },
+  {
+    detect: () => !!process.env.WEZTERM_PANE,
+    open: cmd => spawnDetached('wezterm', ['cli', 'spawn', '--', 'sh', '-c', cmd]),
+  },
+  {
+    detect: () => !!process.env.KONSOLE_VERSION,
+    open: cmd => spawnDetached('konsole', ['--new-tab', '-e', 'sh', '-c', cmd]),
+  },
+  {
+    detect: () => !!process.env.TILIX_ID,
+    open: cmd => spawnDetached('tilix', ['--new-window', '-e', `sh -c '${cmd}'`]),
+  },
+  {
+    detect: () => !!process.env.VTE_VERSION,
+    open: cmd => spawnDetached('gnome-terminal', ['--tab', '--', 'sh', '-c', `${cmd}; exec bash`]),
+  },
+  {
+    // x-terminal-emulator is the Debian/Ubuntu alternatives system default
+    detect: () => true,
+    open: cmd => spawnDetached('x-terminal-emulator', ['-e', `sh -c '${cmd}'`]),
+  },
+];
+
+function openInNewTabLinux(shellCmd: string): void {
+  const terminal = LINUX_TERMINALS.find(t => t.detect())!;
+  terminal.open(shellCmd);
+}
+
 // ── Public API ─────────────────────────────────────────────────────────────
 
 export function openInNewTab(label: string, rawCwd: string): void {
   const cmd = resolveSpawnCmd(label, rawCwd);
   const shellCmd = `cd '${shellEscPath(rawCwd)}' && ${cmd}`;
-  const escaped = esc(shellCmd);
 
-  const scriptFn = TERMINALS[process.env.TERM_PROGRAM ?? ''] ?? FALLBACK;
-  osascript(scriptFn(escaped));
+  if (process.platform === 'linux') {
+    openInNewTabLinux(shellCmd);
+  } else {
+    openInNewTabMacOS(shellCmd);
+  }
 }

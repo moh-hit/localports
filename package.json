@@ -1,7 +1,7 @@
 {
   "name": "localports",
-  "version": "0.1.0",
-  "description": "Beautiful interactive localhost port manager for macOS",
+  "version": "0.2.0",
+  "description": "Beautiful interactive localhost port manager for macOS and Linux",
   "type": "module",
   "bin": {
     "localports": "./dist/cli.js"
@@ -22,7 +22,8 @@
     "cli",
     "process",
     "kill",
-    "macos"
+    "macos",
+    "linux"
   ],
   "author": "Mohit <moh.hit1012@gmail.com>",
   "license": "MIT",
@@ -37,9 +38,6 @@
   "engines": {
     "node": ">=18"
   },
-  "os": [
-    "darwin"
-  ],
   "dependencies": {
     "ink": "^7.0.4",
     "react": "^19.2.6"
