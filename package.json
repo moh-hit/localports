@@ -1,0 +1,53 @@
+{
+  "name": "localports",
+  "version": "0.1.0",
+  "description": "Beautiful interactive localhost port manager for macOS",
+  "type": "module",
+  "bin": {
+    "localports": "./dist/cli.js"
+  },
+  "scripts": {
+    "dev": "tsx src/cli.tsx",
+    "build": "rm -rf dist && tsc && chmod +x dist/cli.js",
+    "prepublishOnly": "npm run build"
+  },
+  "files": [
+    "dist/"
+  ],
+  "keywords": [
+    "port",
+    "localhost",
+    "dev",
+    "terminal",
+    "cli",
+    "process",
+    "kill",
+    "macos"
+  ],
+  "author": "Mohit <moh.hit1012@gmail.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/moh-hit/localports"
+  },
+  "homepage": "https://github.com/moh-hit/localports#readme",
+  "bugs": {
+    "url": "https://github.com/moh-hit/localports/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "darwin"
+  ],
+  "dependencies": {
+    "ink": "^7.0.4",
+    "react": "^19.2.6"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.1",
+    "@types/react": "^19.2.15",
+    "tsx": "^4.22.3",
+    "typescript": "^6.0.3"
+  }
+}
