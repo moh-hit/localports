@@ -4,7 +4,7 @@
 
 <p align="center">
   A beautiful interactive TUI for managing localhost ports — macOS and Linux.<br/>
-  See what's running, kill it, restart it in a new tab, relaunch recent dev servers without remembering the command.
+  See what's running, kill it, restart it in a new tab, tunnel it live, relaunch recent dev servers without remembering the command.
 </p>
 
 <br/>
@@ -43,6 +43,7 @@ Scans all listening TCP ports every 2 seconds. Dev ports appear as cards, system
 | `x` | Kill selected port (SIGTERM) |
 | `o` | Open in browser |
 | `r` | Restart (kills + reopens in new terminal tab) |
+| `t` | Tunnel — expose port publicly via Cloudflare or ngrok |
 | `/` | Enter filter mode |
 | `esc` | Clear filter / quit |
 | `q` | Quit |
@@ -69,6 +70,8 @@ Scans all listening TCP ports every 2 seconds. Dev ports appear as cards, system
 **Filter** — press `/` to enter filter mode. Type to match by port number, command name, or directory. `esc` clears.
 
 **System port grouping** — repeated processes are collapsed into a single line (e.g. Code Helper ×3).
+
+**Quick tunnel** — press `t` on any dev port to expose it publicly via a Cloudflare quick tunnel or ngrok. The public URL appears on the card the moment it's ready. Press `t` again to tear it down. The tunnel is automatically cleaned up when the port process exits.
 
 ## Terminal support
 
@@ -97,6 +100,7 @@ Scans all listening TCP ports every 2 seconds. Dev ports appear as cards, system
 
 - macOS or Linux
 - Node.js 18+
+- For tunneling: [`cloudflared`](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) (recommended, no account needed) or [`ngrok`](https://ngrok.com/download)
 
 ## Contributing
 

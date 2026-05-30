@@ -6,6 +6,7 @@ interface KeymapOptions {
   onKill: () => void;
   onOpen: () => void;
   onRestart: () => void;
+  onTunnel: () => void;
   onFilterChar: (char: string) => void;
   onFilterActivate: () => void;
   onFilterClear: () => void;
@@ -35,6 +36,7 @@ export function useKeymap(opts: KeymapOptions) {
     if (input === 'x') { opts.onKill(); return; }
     if (input === 'o') { opts.onOpen(); return; }
     if (input === 'r') { opts.onRestart(); return; }
+    if (input === 't') { opts.onTunnel(); return; }
     if (input === '/') { opts.onFilterActivate(); return; }
   });
 }

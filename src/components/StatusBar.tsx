@@ -28,6 +28,7 @@ export function StatusBar({ filter, filterActive, total, filtered, selectionKind
       <Key k="x" /><Text color="gray"> kill  </Text>
       <Key k="o" /><Text color="gray"> open  </Text>
       <Key k="r" /><Text color="gray"> restart  </Text>
+      <Key k="t" /><Text color="gray"> tunnel  </Text>
       <Key k="/" /><Text color="gray"> filter  </Text>
       <Key k="q" /><Text color="gray"> quit</Text>
     </Text>

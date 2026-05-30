@@ -1,7 +1,9 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { Box, Text, useApp } from 'ink';
 import { spawnSync } from 'child_process';
+import type { ChildProcess } from 'child_process';
 import { openInNewTab } from './lib/terminal.js';
+import { startTunnel, type TunnelState } from './lib/tunnel.js';
 import { usePorts, type PortEntry } from './hooks/usePorts.js';
 import { useHistory } from './hooks/useHistory.js';
 import { useKeymap } from './hooks/useKeymap.js';
@@ -26,6 +28,9 @@ export function App() {
   // History entries currently being started (show indicator until port appears live)
   const [startingIds, setStartingIds] = useState<Set<string>>(new Set());
   const startTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  // Tunnel state per port
+  const [tunnels, setTunnels] = useState<Map<number, TunnelState>>(new Map());
+  const tunnelProcs = useRef<Map<number, ChildProcess>>(new Map());
 
   // Track previous dev ports to detect natural disappearances
   const prevDevPorts = useRef<Map<number, PortEntry>>(new Map());
@@ -52,6 +57,18 @@ export function App() {
       const next = new Set([...prev].filter(p => active.has(p)));
       return next.size === prev.size ? prev : next;
     });
+  }, [ports]);
+
+  // Kill tunnel procs for ports that are no longer alive
+  useEffect(() => {
+    const activePortNums = new Set(devPorts.map(p => p.port));
+    for (const [port, proc] of tunnelProcs.current) {
+      if (!activePortNums.has(port)) {
+        proc.kill();
+        tunnelProcs.current.delete(port);
+        setTunnels(prev => { const n = new Map(prev); n.delete(port); return n; });
+      }
+    }
   }, [ports]);
 
   // Remove "starting…" once the port shows up live
@@ -170,6 +187,25 @@ export function App() {
     }
   }, [selectedPort, selectedHistory, startHistory]);
 
+  const handleTunnel = useCallback(() => {
+    if (!selectedPort) return;
+    const { port } = selectedPort;
+
+    const existing = tunnelProcs.current.get(port);
+    if (existing) {
+      existing.kill();
+      tunnelProcs.current.delete(port);
+      setTunnels(prev => { const n = new Map(prev); n.delete(port); return n; });
+      return;
+    }
+
+    setTunnels(prev => new Map(prev).set(port, { status: 'starting' }));
+    const proc = startTunnel(port, state => {
+      setTunnels(prev => new Map(prev).set(port, state));
+    });
+    if (proc) tunnelProcs.current.set(port, proc);
+  }, [selectedPort]);
+
   const handleKillOrRemove = useCallback(() => {
     if (selectedPort) {
       handleKill();
@@ -202,6 +238,7 @@ export function App() {
     onKill: handleKillOrRemove,
     onOpen: handleOpen,
     onRestart: handleRestart,
+    onTunnel: handleTunnel,
     onFilterChar: handleFilterChar,
     onFilterActivate: () => setFilterActive(true),
     onFilterClear: handleFilterClear,
@@ -229,6 +266,7 @@ export function App() {
               entry={entry}
               selected={i === selectedIndex}
               action={actions.get(entry.port) ?? null}
+              tunnel={tunnels.get(entry.port)}
             />
           ))}
         </Box>

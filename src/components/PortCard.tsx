@@ -2,14 +2,16 @@ import React from 'react';
 import { Box, Text } from 'ink';
 import type { PortEntry } from '../hooks/usePorts.js';
 import { formatUptime } from '../hooks/usePorts.js';
+import type { TunnelState } from '../lib/tunnel.js';
 
 interface Props {
   entry: PortEntry;
   selected: boolean;
   action: string | null;
+  tunnel?: TunnelState;
 }
 
-export function PortCard({ entry, selected, action }: Props) {
+export function PortCard({ entry, selected, action, tunnel }: Props) {
   const borderColor = action ? 'yellow' : selected ? 'cyan' : 'gray';
   const portColor = selected ? 'cyanBright' : 'cyan';
 
@@ -38,6 +40,20 @@ export function PortCard({ entry, selected, action }: Props) {
           <Text color="gray" dimColor>up <Text color={selected ? 'white' : 'gray'}>{formatUptime(entry.uptime)}</Text></Text>
         )}
       </Box>
+
+      {tunnel && (
+        <Box gap={1}>
+          {tunnel.status === 'starting' && (
+            <Text color="yellow">⇡ tunneling…</Text>
+          )}
+          {tunnel.status === 'active' && tunnel.url && (
+            <Text color="magentaBright">⇡ {tunnel.url}</Text>
+          )}
+          {tunnel.status === 'error' && tunnel.message && (
+            <Text color="red">⇡ {tunnel.message}</Text>
+          )}
+        </Box>
+      )}
     </Box>
   );
 }
